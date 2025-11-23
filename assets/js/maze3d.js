@@ -9,13 +9,18 @@
 
     // --- Pointer Lock (mouse look) state ---
     var _plActive = false;
-    var _mouseSensitivity = 0.001; // 鼠标灵敏度（可按需调整 0.001~0.004）
+    var _mouseSensitivity = 0.002; // 略微调整灵敏度
 
     // --- WASD 键状态（与方向键并行） ---
     var _keys = { w: false, a: false, s: false, d: false };
 
+    // --- 透视导航变量 ---
+    var guideLine; // 导航线对象
+    var exitPosition = new THREE.Vector3(); // 终点坐标
+    var hasExit = false; // 是否找到终点
+
     // === Minimap (Labyrinth-style) config & helpers ===
-    var mapScale = 16; // 每个地图格在小地图上的像素尺寸（6~12可调）
+    var mapScale = 16; // 每个地图格在小地图上的像素尺寸
     function $(id){ return document.getElementById(id); }
     function isWallCellByValue(v){ return (v != 1 && !isNaN(v)); }
     // 世界坐标 -> 连续网格坐标（浮点）
@@ -47,8 +52,8 @@
         input = new Demonixis.Input();
         levelHelper = new Demonixis.GameHelper.LevelHelper();
         cameraHelper = new Demonixis.GameHelper.CameraHelper(camera);
-        cameraHelper.translation = 2.5;
-        cameraHelper.rotation    = 0.01;
+        cameraHelper.translation = 5; // 稍微加快一点移动速度便于测试
+        cameraHelper.rotation    = 0.04;
 
         // 修正：窗口改变时同时更新相机宽高比
         window.addEventListener("resize", function() {
@@ -64,14 +69,12 @@
             var k = e.key.toLowerCase();
             if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
                 _keys[k] = true;
-                e.preventDefault();
             }
         });
         window.addEventListener("keyup", function(e) {
             var k = e.key.toLowerCase();
             if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
                 _keys[k] = false;
-                e.preventDefault();
             }
         });
 
@@ -81,7 +84,7 @@
         messageContainer.style.border = "1px solid #333";
 
         var message = document.createElement("h1");
-        message.innerHTML = "Use ↑/↓/←/→ or WASD to move/rotate. CLICK the canvas, then move the mouse to look around.";
+        message.innerHTML = "Click to Start.<br>Use ARROW keys or WASD to move.<br><span style='color:#00ffff'>X-RAY VISION ACTIVATED</span>";
         message.style.textAlign = "center";
         message.style.color = "#ddd";
         message.style.padding = "15px";
@@ -94,8 +97,10 @@
 
         var timer = setTimeout(function() {
             clearTimeout(timer);
-            document.body.removeChild(messageContainer);
-        }, 3500);
+            if(document.body.contains(messageContainer)) {
+                document.body.removeChild(messageContainer);
+            }
+        }, 5000);
 
         // 初始化鼠标指针锁（鼠标视角）
         setupPointerLock();
@@ -139,9 +144,8 @@
     }
 
     function initializeScene() {
-        // 旧的小地图删除：不再创建 Demonixis.Gui.MiniMap
-        // miniMap = new Demonixis.Gui.MiniMap(map[0].length, map.length, "canvasContainer");
-        // miniMap.create();
+        hasExit = false;
+        if(guideLine) { scene.remove(guideLine); guideLine = null; }
 
         var loader = new THREE.TextureLoader();
         var platformWidth = map[0].length * 100;
@@ -175,6 +179,17 @@
         });
         repeatTexture(wallMaterial.map, 2);
 
+        // --- 透视材质 (X-Ray Material) ---
+        // 使用线框模式，颜色设为青蓝色，关闭深度测试(depthTest: false)使其可以透过墙体被看到
+        var xrayMaterial = new THREE.MeshBasicMaterial({
+            color: 0x0088ff, // 结构光颜色
+            wireframe: true,
+            depthTest: false, // 关键：允许穿透渲染
+            depthWrite: false,
+            transparent: true,
+            opacity: 0.4
+        });
+
         // Map generation
         for (var y = 0, ly = map.length; y < ly; y++) {
             for (var x = 0, lx = map[x].length; x < lx; x++) {
@@ -189,9 +204,18 @@
                 }
 
                 if (map[y][x] > 1) {
+                    // 1. 创建实体墙
                     var wall3D = new THREE.Mesh(wallGeometry, wallMaterial);
                     wall3D.position.set(position.x, position.y, position.z);
                     scene.add(wall3D);
+
+                    // 2. 创建透视结构 (X-Ray Structure)
+                    // 在相同位置创建一个线框盒子，作为透视轮廓
+                    var xrayMesh = new THREE.Mesh(wallGeometry, xrayMaterial);
+                    xrayMesh.position.set(position.x, position.y, position.z);
+                    //稍微放大一点点避免Z-fighting(虽然depthTest关了，但放大一点看起来像是包裹着墙)
+                    xrayMesh.scale.set(1.01, 1.01, 1.01); 
+                    scene.add(xrayMesh);
                 }
 
                 if (map[y][x] === "D") {
@@ -204,8 +228,40 @@
                     cameraHelper.origin.position.mapZ = 0;
                 }
 
-                // 不再调用 miniMap.draw(x, y, map[y][x]);
+                if (map[y][x] === "A") {
+                    // 记录终点位置用于导航线
+                    exitPosition.set(position.x, position.y, position.z);
+                    hasExit = true;
+                    
+                    // 在终点放一个高亮的标记，也具有透视效果
+                    var goalGeo = new THREE.BoxGeometry(20, 100, 20);
+                    var goalMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, depthTest: false, depthWrite: false, transparent: true, opacity: 0.6 });
+                    var goalMesh = new THREE.Mesh(goalGeo, goalMat);
+                    goalMesh.position.set(position.x, position.y, position.z);
+                    scene.add(goalMesh);
+                }
             }
+        }
+
+        // --- 创建导航线 (Guidance Line) ---
+        if (hasExit) {
+            var lineGeo = new THREE.Geometry();
+            // 起点（玩家），稍后在 update 中更新
+            lineGeo.vertices.push(new THREE.Vector3(camera.position.x, camera.position.y - 10, camera.position.z));
+            // 终点
+            lineGeo.vertices.push(exitPosition);
+
+            var lineMat = new THREE.LineBasicMaterial({
+                color: 0xff0000, // 红色导航线
+                linewidth: 2,
+                depthTest: false, // 关键：穿透墙体
+                depthWrite: false,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            guideLine = new THREE.Line(lineGeo, lineMat);
+            scene.add(guideLine);
         }
 
         // Lights
@@ -315,7 +371,7 @@
             moveCamera("right");
         }
 
-        // Virtual pad（保留参数，若未使用可忽略）
+        // Virtual pad
         var params = {
             rotation: 0.05,
             translation: 5
@@ -335,6 +391,14 @@
 
         // 更新小地图覆盖层
         updateMiniMapOverlay();
+
+        // --- 更新透视导航线 ---
+        if (guideLine && hasExit) {
+            // 将线的起点设置为相机下方一点点的位置，看起来像是从玩家发出的引导光束
+            guideLine.geometry.vertices[0].copy(camera.position);
+            guideLine.geometry.vertices[0].y -= 15; // 降低一点，不挡住准心
+            guideLine.geometry.verticesNeedUpdate = true;
+        }
     }
 
     function draw() {
@@ -396,7 +460,6 @@
             camera.rotation.y = rotation;
             camera.position.x = position.x;
             camera.position.z = position.z;
-            // miniMap.update(...) 已移除，改为在 update() 里统一刷新覆盖层
         } else {
             var s = document.getElementById("bumpSound");
             if (s) s.play();
@@ -416,7 +479,8 @@
     function endScreen() {
         if (levelHelper.isFinished || levelHelper.isMobile) {
             alert("Good job, The game is over\n\nThanks you for playing!");
-            document.location.href = "https://plus.google.com/u/0/114532615363095107351/posts";
+            // 这里保留原来的跳转或者刷新逻辑
+            document.location.reload();
         } else {
             for (var i = 0, l = scene.children.length; i < l; i++) {
                 scene.remove(scene.children[i]);
